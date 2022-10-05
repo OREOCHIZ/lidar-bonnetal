@@ -94,7 +94,7 @@ class Trainer():
     self.multi_gpu = False
     self.n_gpus = 0
     self.model_single = self.model
-    self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # here
     print("Training in device: ", self.device)
     if torch.cuda.is_available() and torch.cuda.device_count() > 0:
       cudnn.benchmark = True
@@ -109,14 +109,14 @@ class Trainer():
       self.model_single = self.model.module  # single model to get weight names
       self.multi_gpu = True
       self.n_gpus = torch.cuda.device_count()
-      if self.n_gpus > 2:
-          self.n_gpus = 2
+      # if self.n_gpus > 2:
+      #     self.n_gpus = 2
       # self.n_gpus = torch.cuda.device_count()
 
     # loss
     if "loss" in self.ARCH["train"].keys() and self.ARCH["train"]["loss"] == "xentropy":
       # self.criterion = nn.NLLLoss(weight=self.loss_w).to(self.device)
-      self.criterion = ContrastCELoss(self.ARCH, self.loss_w)
+      self.criterion = ContrastCELoss(self.ARCH, self.loss_w).to(self.device)
     else:
       raise Exception('Loss not defined in config file')
     # loss as dataparallel too (more images in batch)

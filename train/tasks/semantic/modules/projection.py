@@ -10,10 +10,11 @@ class ProjectionHead(nn.Module):
 
 
         if proj == 'linear':
-            self.proj = nn.Conv2d(dim_in, proj_dim, kernel_size=1)
+            self.proj = nn.Conv2d(dim_in, proj_dim, kernel_size=3, stride = 1, padding = 1)
         elif proj == 'convmlp':
             self.proj = nn.Sequential(
                 nn.Conv2d(dim_in, dim_in, kernel_size=1),
+                # nn.Conv2d(dim_in, dim_in, kernel_size=1),
                 nn.Sequential(
                     nn.BatchNorm2d(dim_in),
                     nn.ReLU()

@@ -21,7 +21,7 @@ class Segmentator(nn.Module):
 
     # get the model
     bboneModule = imp.load_source("bboneModule",
-                                  booger.TRAIN_PATH + '/backbones/' +
+                                  booger.TRAIN_PATH + '/backbones_contrastive/' +
                                   self.ARCH["backbone"]["name"] + '.py')
     self.backbone = bboneModule.Backbone(params=self.ARCH["backbone"])
 
@@ -48,9 +48,13 @@ class Segmentator(nn.Module):
                               nn.Conv2d(self.decoder.get_last_depth(),
                                         self.nclasses, kernel_size=3,
                                         stride=1, padding=1))
-    self.proj_head = ProjectionHead(self.decoder.get_last_depth(), proj_dim=self.ARCH["contrastive"]["proj_dim"])
+    self.proj_head = ProjectionHead(self.backbone.get_last_depth(), proj_dim=self.ARCH["contrastive"]["proj_dim"])
+
+
     if self.ARCH["post"]["CRF"]["use"]:
       self.CRF = CRF(self.ARCH["post"]["CRF"]["params"], self.nclasses)
+
+
     else:
       self.CRF = None
 
@@ -85,9 +89,11 @@ class Segmentator(nn.Module):
     weights_enc = sum(p.numel() for p in self.backbone.parameters())
     weights_dec = sum(p.numel() for p in self.decoder.parameters())
     weights_head = sum(p.numel() for p in self.head.parameters())
+    weights_proj_head = sum(p.numel() for p in self.proj_head.parameters())
     print("Param encoder ", weights_enc)
     print("Param decoder ", weights_dec)
     print("Param head ", weights_head)
+    print("Param projection head ", weights_proj_head)
     if self.CRF:
       weights_crf = sum(p.numel() for p in self.CRF.parameters())
       print("Param CRF ", weights_crf)
@@ -131,6 +137,18 @@ class Segmentator(nn.Module):
           print("I'm in strict mode and failure to load weights blows me up :)")
           raise e
 
+      # 221004
+      try:
+        w_dict = torch.load(path + "/proj_head" + path_append,
+                            map_location=lambda storage, loc: storage)
+        self.proj_head.load_state_dict(w_dict, strict=True)
+        print("Successfully loaded model proj head weights")
+      except Exception as e:
+        print("Couldn't load proj head, using random weights. Error: ", e)
+        if strict:
+          print("I'm in strict mode and failure to load weights blows me up :)")
+          raise e
+
       # try CRF
       if self.CRF:
         try:
@@ -147,19 +165,24 @@ class Segmentator(nn.Module):
       print("No path to pretrained, using random init.")
 
   def forward(self, x, mask=None):
-    y, skips = self.backbone(x)
-    y = self.decoder(y, skips)
-    seg_out = y
-    embed = self.proj_head(seg_out)
+    y, skips = self.backbone(x) # 1024 * 64 * 64
 
-    y = self.head(y)
-    y = F.softmax(y, dim=1)
-    cls_out = y
+    y_dec = y
+    y_dec = self.decoder(y_dec, skips) # 30 * 64 * 64
+
+    cls_out = self.head(y_dec)
+    cls_out = F.softmax(cls_out, dim=1)
 
 
+    _, _, h, w = y_dec.size()
+    y_enc = F.interpolate(y, size=(h, w), mode="bilinear", align_corners=True)
+    # now I interpolate encoded image with
+    embed = self.proj_head(y_enc)
+
+    a = 1
     if self.CRF:
       assert(mask is not None)
-      y = self.CRF(x, y, mask)
+      cls_out = self.CRF(x, cls_out, mask)
 
     return {'seg': cls_out, 'embed': embed}
 
@@ -171,6 +194,10 @@ class Segmentator(nn.Module):
                "/segmentation_decoder" + suffix)
     torch.save(self.head.state_dict(), logdir +
                "/segmentation_head" + suffix)
+    torch.save(self.proj_head.state_dict(), logdir +
+               "/proj_head" + suffix) #221004
     if self.CRF:
       torch.save(self.CRF.state_dict(), logdir +
                  "/segmentation_CRF" + suffix)
+
+
