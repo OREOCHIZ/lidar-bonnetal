@@ -52,7 +52,8 @@ class Segmentator(nn.Module):
 
 
     if self.ARCH["post"]["CRF"]["use"]:
-      self.CRF = CRF(self.ARCH["post"]["CRF"]["params"], self.nclasses)
+      print("use CRF")
+      self.CRF = CRF_(self.ARCH["post"]["CRF"]["params"], self.nclasses)
 
 
     else:
@@ -170,8 +171,9 @@ class Segmentator(nn.Module):
     y_dec = y
     y_dec = self.decoder(y_dec, skips) # 30 * 64 * 64
 
-    cls_out = self.head(y_dec)
-    cls_out = F.softmax(cls_out, dim=1)
+    cls_out_ = self.head(y_dec)
+    cls_out = F.softmax(cls_out_, dim=1)
+    # cls_log_out = F.log_softmax(cls_out_, dim=1)
 
 
     _, _, h, w = y_dec.size()
@@ -179,10 +181,10 @@ class Segmentator(nn.Module):
     # now I interpolate encoded image with
     embed = self.proj_head(y_enc)
 
-    a = 1
     if self.CRF:
       assert(mask is not None)
-      cls_out = self.CRF(x, cls_out, mask)
+      cls_out_ = self.CRF(x, cls_out, mask)
+      return {'seg': cls_out_, 'embed': embed}
 
     return {'seg': cls_out, 'embed': embed}
 

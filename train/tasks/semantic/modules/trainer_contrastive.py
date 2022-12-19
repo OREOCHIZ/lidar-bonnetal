@@ -25,7 +25,7 @@ from common.warmupLR import *
 from tasks.semantic.modules.segmentator_contrastive import *
 from tasks.semantic.modules.loss_contrastive import *
 from tasks.semantic.modules.ioueval import *
-
+from tasks.semantic.modules.Lovasz_softmax import Lovasz_softmax
 
 class Trainer():
   def __init__(self, ARCH, DATA, datadir, logdir, path=None):
@@ -53,7 +53,23 @@ class Trainer():
     # get the data
     parserPath = os.path.join(booger.TRAIN_PATH, "tasks", "semantic",  "dataset", self.DATA["name"], "parser.py")
     parserModule = imp.load_source("parserModule", parserPath)
-    self.parser = parserModule.Parser(root=self.datadir,
+    # self.parser = parserModule.Parser(root=self.datadir,
+    #                                   train_sequences=self.DATA["split"]["train"],
+    #                                   valid_sequences=self.DATA["split"]["valid"],
+    #                                   test_sequences=None,
+    #                                   labels=self.DATA["labels"],
+    #                                   color_map=self.DATA["color_map"],
+    #                                   learning_map=self.DATA["learning_map"],
+    #                                   learning_map_inv=self.DATA["learning_map_inv"],
+    #                                   sensor=self.ARCH["dataset"]["sensor"],
+    #                                   max_points=self.ARCH["dataset"]["max_points"],
+    #                                   batch_size=self.ARCH["train"]["batch_size"],
+    #                                   workers=self.ARCH["train"]["workers"],
+    #                                   gt=True,
+    #                                   shuffle_train=True)
+
+
+    self.parser = parserModule.ParserAug(root=self.datadir,
                                       train_sequences=self.DATA["split"]["train"],
                                       valid_sequences=self.DATA["split"]["valid"],
                                       test_sequences=None,
@@ -66,8 +82,9 @@ class Trainer():
                                       batch_size=self.ARCH["train"]["batch_size"],
                                       workers=self.ARCH["train"]["workers"],
                                       gt=True,
-                                      shuffle_train=True)
-
+                                      shuffle_train=True,
+                                      add_augment = self.ARCH["add_augment"])
+    print("using data augmentation: ", self.ARCH["add_augment"]["use"])
     # weights for loss (and bias)
     # weights for loss (and bias)
     epsilon_w = self.ARCH["train"]["epsilon_w"]
@@ -116,7 +133,13 @@ class Trainer():
     # loss
     if "loss" in self.ARCH["train"].keys() and self.ARCH["train"]["loss"] == "xentropy":
       # self.criterion = nn.NLLLoss(weight=self.loss_w).to(self.device)
-      self.criterion = ContrastCELoss(self.ARCH, self.loss_w).to(self.device)
+      if self.ARCH["lovasz"]["use"]:
+        print("use lovasz softmax!")
+        self.criterion = ContrastCELoss(self.ARCH, self.loss_w).to(self.device)
+        self.ls = Lovasz_softmax(ignore=0).to(self.device)
+      else:
+        print("no use lovasz softmax!")
+        self.criterion = ContrastCELoss(self.ARCH, self.loss_w).to(self.device)
     else:
       raise Exception('Loss not defined in config file')
     # loss as dataparallel too (more images in batch)
@@ -313,6 +336,7 @@ class Trainer():
     for i, (in_vol, proj_mask, proj_labels, _, path_seq, path_name, _, _, _, _, _, _, _, _, _) in enumerate(train_loader):
         # measure data loading time
       data_time.update(time.time() - end)
+
       if not self.multi_gpu and self.gpu:
         in_vol = in_vol.cuda()
         proj_mask = proj_mask.cuda()
@@ -324,8 +348,14 @@ class Trainer():
 
       seg_out = output['seg']
       embed_out = output['embed']
+      if self.ARCH["lovasz"]["use"]:
+        print("[Valid] using lovasz loss")
+        loss = criterion(embed_out, seg_out, proj_labels) + self.ls(seg_out, proj_labels.long())
 
-      loss = criterion(embed_out, seg_out, proj_labels)
+      else:
+        print("[Valid] no using lovasz loss")
+        loss = criterion(embed_out, seg_out, proj_labels)
+
       # loss = criterion(torch.log(output.clamp(min=1e-8)), proj_labels)
 
       # compute gradient and do SGD step
@@ -428,8 +458,13 @@ class Trainer():
 
         seg_out = output['seg']
         embed_out = output['embed']
+        if self.ARCH["lovasz"]["use"]:
+            print("[Train] using lovasz loss")
+            loss = criterion(embed_out, seg_out, proj_labels) + self.ls(seg_out, proj_labels.long())
 
-        loss = criterion(embed_out, seg_out, proj_labels)
+        else:
+            print("[Train] no using lovasz loss")
+            loss = criterion(embed_out, seg_out, proj_labels)
 
         # measure accuracy and record loss
         argmax = seg_out.argmax(dim=1)

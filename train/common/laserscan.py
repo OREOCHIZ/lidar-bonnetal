@@ -55,7 +55,7 @@ class LaserScan:
   def __len__(self):
     return self.size()
 
-  def open_scan(self, filename):
+  def open_scan(self, filename, act_aug = False, rotate_aug=False, flip_aug=False, scale_aug=False, transform=False, trans_std=[0.1, 0.1, 0.1]):
     """ Open raw scan and fill in attributes
     """
     # reset just in case there was an open structure
@@ -77,7 +77,41 @@ class LaserScan:
     # put in attribute
     points = scan[:, 0:3]    # get xyz
     remissions = scan[:, 3]  # get remission
+    if act_aug:
+      points = self.augment_pc(points, rotate_aug, flip_aug, scale_aug, transform, trans_std)
     self.set_points(points, remissions)
+
+  def augment_pc(self, xyz, rotate_aug=False, flip_aug=False, scale_aug=False, transform=False, trans_std=[0.1, 0.1, 0.1]):
+
+    if rotate_aug:
+      rotate_rad = np.deg2rad(np.random.random() * 90) - np.pi / 4
+      c, s = np.cos(rotate_rad), np.sin(rotate_rad)
+      j = np.matrix([[c, s], [-s, c]])
+      xyz[:, :2] = np.dot(xyz[:, :2], j)
+
+    # random data augmentation by flip x , y or x+y
+    if flip_aug:
+      flip_type = np.random.choice(4, 1)
+      if flip_type == 1:
+        xyz[:, 0] = -xyz[:, 0]
+      elif flip_type == 2:
+        xyz[:, 1] = -xyz[:, 1]
+      elif flip_type == 3:
+        xyz[:, :2] = -xyz[:, :2]
+    if scale_aug:
+      noise_scale = np.random.uniform(0.95, 1.05)
+      xyz[:, 0] = noise_scale * xyz[:, 0]
+      xyz[:, 1] = noise_scale * xyz[:, 1]
+    # convert coordinate into polar coordinates
+
+    if transform:
+      noise_translate = np.array([np.random.normal(0, trans_std[0], 1),
+                                  np.random.normal(0, trans_std[1], 1),
+                                  np.random.normal(0, trans_std[2], 1)]).T
+
+      xyz[:, 0:3] += noise_translate
+
+    return xyz
 
   def set_points(self, points, remissions=None):
     """ Set scan attributes (instead of opening from file)

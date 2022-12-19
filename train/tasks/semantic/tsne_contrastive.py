@@ -10,11 +10,11 @@ import os
 import shutil
 import __init__ as booger
 
-from tasks.semantic.modules.user_contrastive import *
+from tasks.semantic.modules.test_tsne import *
 
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser("./infer_contrastive.py")
+  parser = argparse.ArgumentParser("./tsne_contrastive.py")
   parser.add_argument(
       '--dataset', '-d',
       type=str,
@@ -105,5 +105,5 @@ if __name__ == '__main__':
     quit()
 
   # create user and infer dataset
-  user = User(ARCH, DATA, FLAGS.dataset, FLAGS.log, FLAGS.model)
-  user.infer()
+  tsne = Test_TSNE(ARCH, DATA, FLAGS.dataset, FLAGS.log, FLAGS.model)
+  tsne.infer()
