@@ -1,5 +1,6 @@
 ################################################################################
 # training parameters
+# This is additional training version
 ################################################################################
 train:
   loss: "xentropy"       # must be either xentropy or iou
@@ -9,7 +10,7 @@ train:
   momentum: 0.9          # sgd momentum
   lr_decay: 0.99         # learning rate decay per epoch after initial cycle (from min lr)
   w_decay: 0.0001        # weight decay
-  batch_size: 2          # batch size
+  batch_size: 4         # batch size
   report_batch: 1        # every x batches, report loss
   report_epoch: 1        # every x epochs, report validation set
   epsilon_w: 0.001       # class weight w = 1 / (content + epsilon_w)
@@ -41,7 +42,7 @@ backbone:
 ################################################################################
 decoder:
   name: "darknet"
-  dropout: 0.05 # 0.01
+  dropout: 0.01
   bn_d: 0.01
   train: True # train decoder?
   extra: False # nothing to add for this decoder, otherwise this is a dict
@@ -52,7 +53,7 @@ decoder:
 head:
   name: "segmentation"
   train: True
-  dropout: 0.05 # 0.01
+  dropout: 0.01
 
 ################################################################################
 # postproc parameters
@@ -94,7 +95,7 @@ dataset:
     fov_up: 3
     fov_down: -25 
     img_prop:
-      width: 512
+      width: 2048
       height: 64
     img_means: #range,x,y,z,signal
       - 12.12
@@ -125,7 +126,6 @@ contrastive:
   with_embed: True
   with_memory: False
   memory_size: 5000
-  loss_type: "nlloss"
 
     # if you don't wanna use it, set memory bank as False
 

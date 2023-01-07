@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import random
+from tasks.semantic.modules.border_extractor import borderExtracter
 from collections import deque
 # from loss_additional import *
 
@@ -21,7 +22,6 @@ class ContrastCELoss(nn.Module):
         self.contrast_creterion = PixelContrastLoss(self.ARCH) # added loss
 
     def forward(self, feats, outputs, labels):
-        # seg_loss = self.seg_creterion(outputs, labels)
         seg_loss = self.seg_creterion(torch.log(outputs.clamp(min=1e-8)), labels)
 
         # 221215
@@ -34,18 +34,19 @@ class ContrastCELoss(nn.Module):
         return seg_loss + 0 * contrast_loss
 
 
-class ContrastCEDiceLoss(nn.Module):
+class ContrastNLLoss(nn.Module):
     def __init__(self, ARCH, loss_w):
-        super(ContrastCELoss, self).__init__()
+        super(ContrastNLLoss, self).__init__()
         self.ARCH = ARCH
         self.loss_weight = self.ARCH['contrastive']['loss_weight']
 
-        self.seg_creterion = nn.NLLLoss(weight=loss_w)  # loss existing
-        self.contrast_creterion = PixelContrastLoss(self.ARCH)  # added loss
+        self.seg_creterion = nn.NLLLoss(weight=loss_w) # loss existing
+        self.contrast_creterion = PixelContrastLoss(self.ARCH) # added loss
 
     def forward(self, feats, outputs, labels):
-        seg_loss = self.seg_creterion(torch.log(outputs.clamp(min=1e-8)), labels)
+        seg_loss = self.seg_creterion(outputs, labels)
         _, predict = torch.max(outputs, 1)
+
         contrast_loss = self.contrast_creterion(feats, labels, predict)
 
         if self.ARCH['contrastive']['with_embed'] is True:
@@ -64,7 +65,7 @@ class PixelContrastLoss(nn.Module):
         self.ignore_label = self.ARCH['contrastive']['loss_w']
         self.queue = None
         self.memory_size = 0
-
+        self.border_ext = borderExtracter(20, 0)
 
         if self.ARCH['contrastive']['with_memory']:
             self.queue = {}
@@ -74,6 +75,8 @@ class PixelContrastLoss(nn.Module):
 
 
     def forward(self, feats, labels, predict):
+        self.border_sampling(feats, labels, predict)
+
 
         labels = labels.unsqueeze(1).float().clone()
         labels = torch.nn.functional.interpolate(labels,
@@ -168,6 +171,56 @@ class PixelContrastLoss(nn.Module):
                 X_ptr += 1
 
         return X_, y_
+
+    def border_sampling(self, X, y_hat, y):
+        # X = b x C x H x W
+        batch_size, feat_dim = X.shape[0], X.shape[1]
+        for ii in range(batch_size):
+            this_y = y_hat[ii]
+            be_yhat = self.border_ext.get_border_from_label(this_y, erode_iter=1)
+            # nonzero_mask = this_y > 0
+            be_yhat_mask = ~ ((this_y == 0) | (be_yhat == 0))
+            border_label = this_y[be_yhat_mask] # (be_yhat * this_y).nonzero()
+            border_class = torch.unique(border_label)
+
+            print(border_class)
+
+            border_feature = X[ii, :, be_yhat_mask]
+            print(border_feature)
+
+            border_label = border_label.contiguous().view(-1, 1)
+            contrast_mask = torch.eq(border_label, torch.transpose(border_label, 0, 1)).float().cuda() # border samples mask
+
+            border_dot = torch.div(torch.matmul(torch.transpose(border_feature, 0, 1), border_feature ),
+                                            self.temperature)
+
+            logits_max, _ = torch.max(border_dot, dim=1, keepdim=True)
+            logits = border_dot - logits_max.detach()
+
+            neg_mask = 1 - contrast_mask
+
+            logits_mask = 1 - torch.eye(contrast_mask.shape[0])
+            contrast_mask = contrast_mask * logits_mask.cuda()
+
+
+            neg_logits = torch.exp(logits) * neg_mask
+            neg_logits = neg_logits.sum(1, keepdim=True)
+
+            exp_logits = torch.exp(logits)
+            log_prob = logits - torch.log(exp_logits + neg_logits)
+            mean_log_prob_pos = (contrast_mask * log_prob).sum(1) / contrast_mask.sum(1)  # good
+
+            loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
+            loss = loss.mean()
+            print("border loss: ", loss)
+
+            # import numpy as np
+            # np.save("/ws/result/border_test_512/border_label.npy", border_label.detach().cpu().numpy())
+            # np.save("/ws/result/border_test_512/contrast_mask.npy", contrast_mask.detach().cpu().numpy())
+            # np.save("/ws/result/border_test_512/border_dot.npy", border_dot.detach().cpu().numpy())
+
+            print("borrrrder")
+
 
 
     def _hard_anchor_sampling_V2(self, X, y_hat, y):
@@ -274,11 +327,9 @@ class PixelContrastLoss(nn.Module):
         return X_, y_
 
     def _minor_anchor_sampling_(self, X, y_hat, y):
+        minor_class = []
+        major_class = []
         batch_size, feat_dim = X.shape[0], X.shape[-1]  # in this case, (batch_size, 256)
-        # X: feats  || batch_size * H * W * channels( = 256 )
-        # y_hat: label( = ground truth ) ||
-        # y: predict ( = predictions )
-        # X: shape
 
         classes = []
         total_classes = 0
@@ -292,12 +343,6 @@ class PixelContrastLoss(nn.Module):
             order, arg_ = torch.sort(ratio_class)
             order = order < 0.04 # something local...need to change
             total_sample_num += torch.sum(num_class[arg_][order])
-            # if gt label data has not information about some labels ( such as bycycle, bicyclist, bus, motorcycle ... )
-            # we don't consider that label.
-
-            # topk = order.shape[0] // 2
-            # if topk < 1:
-            #     topk = order.shape[0]
 
             this_classes = [x for x in sorted_classes[arg_][order]]
             this_classes = [x for x in this_classes if x not in self.ignore_label]
@@ -312,11 +357,6 @@ class PixelContrastLoss(nn.Module):
             return None, None
 
         n_view = total_sample_num # self.max_samples // total_classes
-        # max_samples now: 1024, total_classes: batch size * (one batch image classes)
-        # n_view = min(n_view, self.max_views)
-
-        # X_ = torch.zeros((total_classes, n_view, feat_dim), dtype=torch.float).cuda()
-        # y_ = torch.zeros(total_classes, dtype=torch.float).cuda()
 
         X_ptr = 0
 
@@ -465,12 +505,19 @@ class PixelContrastLoss(nn.Module):
         return X_, y_
 
     def _contrastive(self, feats_, labels_):
+        import numpy as np # 221229
+
         anchor_num, n_view = feats_.shape[0], feats_.shape[1]
         # anchor_num = class numbers all in batches ( overlap class can exist) # 37
         # n_view = indices number. static for each samples (hard + easy) # 27
 
         labels_ = labels_.contiguous().view(-1, 1) # gt == shape(37, )
+        # labels_npy = labels_.detach().cpu().numpy() # 221229
+        # np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/labels_.npy", labels_npy)
         mask = torch.eq(labels_, torch.transpose(labels_, 0, 1)).float().cuda()
+        # mask_npy = mask.detach().cpu().numpy()  # 221229
+        # np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/mask_before_repeat.npy", mask_npy)
+        #not always to be diagonal matrix
         # mask = one hot encoding map for n_view sampling data, shape (37 * 37)
         # mask == diagonal matrix ! ! ! ! Identity matrix!!!
 
@@ -488,25 +535,46 @@ class PixelContrastLoss(nn.Module):
         anchor_dot_contrast = torch.div(torch.matmul(anchor_feature, torch.transpose(contrast_feature, 0, 1)),
                                         self.temperature) # in L_NCE, i*i+ / tau
         # anchor feature * contrast feature / 256 -> same label features have max values
-
+        # anchor_dot_contrast_npy = anchor_dot_contrast.detach().cpu().numpy()  # 221229
+        # np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/anchor_dot_contrast.npy",anchor_dot_contrast_npy)
+        # no
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
 
+        # logits_npy = logits.detach().cpu().numpy()  # 221229
+        # np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/logits.npy", logits_npy)
+        # #
+
         mask = mask.repeat(anchor_count, contrast_count)
+        # mask_npy = mask.detach().cpu().numpy() # 221229
+        # np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/mask_after_repeat.npy", mask_npy)
         neg_mask = 1 - mask
 
         logits_mask = torch.ones_like(mask).scatter_(1,
                                                      torch.arange(anchor_num * anchor_count).view(-1, 1).cuda(),
                                                      0)
         mask = mask * logits_mask
+        # mask_npy = mask.detach().cpu().numpy()  # 221229
+        # np.save(
+        #     "/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/mask_after_repeat2.npy",
+        #     mask_npy)
 
         neg_logits = torch.exp(logits) * neg_mask
         neg_logits = neg_logits.sum(1, keepdim=True)
 
+        # logits_npy = neg_logits.detach().cpu().numpy()  # 221229
+        # np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/neg_logits.npy", logits_npy)
+        #
+
         exp_logits = torch.exp(logits)
 
-        log_prob = logits - torch.log(exp_logits + neg_logits)
-        mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
+        log_prob = logits - torch.log(exp_logits + neg_logits) # real strange
+        #log_prob = logits  - torch.log(neg_logits) is enough?
+
+
+        # log_prob_npy = log_prob.detach().cpu().numpy() # 221229
+        # np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/log_prob.npy", log_prob_npy)
+        mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1) # good
 
         loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
         loss = loss.mean()

@@ -58,17 +58,43 @@ class iouEval:
     # print(self.fp.shape)
     # print(self.fn.shape)
 
-  def getStats(self):
-    # remove fp and fn from confusion on the ignore classes cols and rows
-    conf = self.conf_matrix.clone().double()
-    conf[self.ignore] = 0
-    conf[:, self.ignore] = 0
+  def addBatch_save_conf(self, x, y, count):  # x=preds, y=targets
+    # if numpy, pass to pytorch
+    # to tensor
+    if isinstance(x, np.ndarray):
+      x = torch.from_numpy(np.array(x)).long().to(self.device)
+    if isinstance(y, np.ndarray):
+      y = torch.from_numpy(np.array(y)).long().to(self.device)
 
-    # get the clean stats
-    tp = conf.diag()
-    fp = conf.sum(dim=1) - tp
-    fn = conf.sum(dim=0) - tp
-    return tp, fp, fn
+    # sizes should be "batch_size x H x W"
+    x_row = x.reshape(-1)  # de-batchify
+    y_row = y.reshape(-1)  # de-batchify
+
+    # idxs are labels and predictions
+    idxs = torch.stack([x_row, y_row], dim=0)
+
+    # ones is what I want to add to conf when I
+    conf_matrix = torch.zeros(  (self.n_classes, self.n_classes), device=self.device).long()
+    ones = torch.ones((idxs.shape[-1]), device=self.device).long()
+    conf_matrix = conf_matrix.index_put_(tuple(idxs), ones, accumulate=True)
+    conf_matrix = conf_matrix.double()
+    conf_matrix[self.ignore] = 0
+    conf_matrix[:, self.ignore] = 0
+    log_prob_npy = conf_matrix.detach().cpu().numpy()  # 221229
+    np.save("/ws/result/log_xentropy_contrastive_lr_3e-3_lr_decay_99e-3_RV_2048_xentopy_contrastive_heatmap/valid_conf_matrix_"+str(count)+".npy", log_prob_npy)
+
+
+  def getStats(self):
+      # remove fp and fn from confusion on the ignore classes cols and rows
+      conf = self.conf_matrix.clone().double()
+      conf[self.ignore] = 0
+      conf[:, self.ignore] = 0
+
+      # get the clean stats
+      tp = conf.diag()
+      fp = conf.sum(dim=1) - tp
+      fn = conf.sum(dim=0) - tp
+      return tp, fp, fn
 
   def getIoU(self):
     tp, fp, fn = self.getStats()

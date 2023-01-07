@@ -132,14 +132,17 @@ class Trainer():
 
     # loss
     if "loss" in self.ARCH["train"].keys() and self.ARCH["train"]["loss"] == "xentropy":
-      # self.criterion = nn.NLLLoss(weight=self.loss_w).to(self.device)
-      if self.ARCH["lovasz"]["use"]:
-        print("use lovasz softmax!")
-        self.criterion = ContrastCELoss(self.ARCH, self.loss_w).to(self.device)
-        self.ls = Lovasz_softmax(ignore=0).to(self.device)
+      if self.ARCH["contrastive"]["with_embed"]:
+          if self.ARCH["contrastive"]["loss_type"] == "xentropy":
+            print("use Xentropy + contrastive loss!")
+            self.criterion = ContrastCELoss(self.ARCH, self.loss_w).to(self.device)
+
+          else:
+            print("use NL Loss + contrastive loss!")
+            self.criterion = ContrastNLLoss(self.ARCH, self.loss_w).to(self.device)
+
       else:
-        print("no use lovasz softmax!")
-        self.criterion = ContrastCELoss(self.ARCH, self.loss_w).to(self.device)
+          self.criterion = nn.NLLLoss(weight=self.loss_w).to(self.device)
     else:
       raise Exception('Loss not defined in config file')
     # loss as dataparallel too (more images in batch)
@@ -348,15 +351,15 @@ class Trainer():
 
       seg_out = output['seg']
       embed_out = output['embed']
-      if self.ARCH["lovasz"]["use"]:
-        print("[Valid] using lovasz loss")
-        loss = criterion(embed_out, seg_out, proj_labels) + self.ls(seg_out, proj_labels.long())
+
+      if self.ARCH["contrastive"]["with_embed"]:
+        loss = criterion(embed_out, seg_out, proj_labels)
+        # print("[Valid] using lovasz loss")
+        # loss = criterion(embed_out, seg_out, proj_labels) + self.ls(seg_out, proj_labels.long())
 
       else:
-        print("[Valid] no using lovasz loss")
-        loss = criterion(embed_out, seg_out, proj_labels)
-
-      # loss = criterion(torch.log(output.clamp(min=1e-8)), proj_labels)
+        # print("[Valid] no using lovasz loss")
+        loss = criterion(torch.log(seg_out.clamp(min=1e-8)), proj_labels)
 
       # compute gradient and do SGD step
       optimizer.zero_grad()
@@ -433,6 +436,7 @@ class Trainer():
     acc = AverageMeter()
     iou = AverageMeter()
     rand_imgs = []
+    # add_batch_counter = 0
 
     # switch to evaluate mode
     model.eval()
@@ -458,17 +462,18 @@ class Trainer():
 
         seg_out = output['seg']
         embed_out = output['embed']
-        if self.ARCH["lovasz"]["use"]:
-            print("[Train] using lovasz loss")
-            loss = criterion(embed_out, seg_out, proj_labels) + self.ls(seg_out, proj_labels.long())
-
-        else:
-            print("[Train] no using lovasz loss")
+        if self.ARCH["contrastive"]["with_embed"]:
+            # print("[Train] using lovasz loss")
             loss = criterion(embed_out, seg_out, proj_labels)
+        else:
+            # print("[Train] no using lovasz loss")
+            loss = criterion(torch.log(seg_out.clamp(min=1e-8)), proj_labels)
 
         # measure accuracy and record loss
         argmax = seg_out.argmax(dim=1)
         evaluator.addBatch(argmax, proj_labels)
+        # evaluator.addBatch_save_conf(argmax, proj_labels, add_batch_counter )  # please delete 230104
+        # add_batch_counter = add_batch_counter + 1
         losses.update(loss.mean().item(), in_vol.size(0))
 
         if save_scans:
