@@ -75,7 +75,8 @@ class PixelContrastLoss(nn.Module):
 
 
     def forward(self, feats, labels, predict):
-        self.border_sampling(feats, labels, predict)
+        # self.border_sampling(feats, labels, predict)
+        self.consine_similarity_test(feats, labels, predict)
 
 
         labels = labels.unsqueeze(1).float().clone()
@@ -177,19 +178,67 @@ class PixelContrastLoss(nn.Module):
         batch_size, feat_dim = X.shape[0], X.shape[1]
         for ii in range(batch_size):
             this_y = y_hat[ii]
+            this_pred = y[ii]
             be_yhat = self.border_ext.get_border_from_label(this_y, erode_iter=1)
             # nonzero_mask = this_y > 0
+
+
             be_yhat_mask = ~ ((this_y == 0) | (be_yhat == 0))
-            border_label = this_y[be_yhat_mask] # (be_yhat * this_y).nonzero()
-            border_class = torch.unique(border_label)
+            border_label = this_y[be_yhat_mask]
+
+            #### idea... ####
+            # unq, cnt = torch.unique(border_label, return_counts = True)
+            # unq_ext = torch.where(cnt == 1)
+            # if len(unq_ext[0]) != 0:
+            #     for ext in unq_ext[0]:
+            #         be_yhat_mask = (be_yhat_mask != ext)
+            #     border_label = this_y[be_yhat_mask]
+            # ### ###
+
+             # (be_yhat * this_y).nonzero()
+
+
+            import numpy as np
+            # np.save("/ws/result/border_test_512/border_label_distribution.npy", border_label.detach().cpu().numpy())
+            # which is easy border or hard border ????
+
+            easy_border_mask = (torch.eq(this_y, this_pred)) & be_yhat_mask
+            easy_b_label = this_y[easy_border_mask]
+            # np.save("/ws/result/border_test_2048/easy_b_label.npy", easy_b_label.detach().cpu().numpy())
+
+            hard_border_mask = (torch.ne(this_y, this_pred)) & be_yhat_mask
+            hard_b_label = this_y[hard_border_mask]
+            assert (border_label.shape[0] == (easy_b_label.shape[0] + hard_b_label.shape[0]))
+
+            unq, cnt = torch.unique(hard_b_label, return_counts=True)
+            unq_ext = torch.where(cnt == 1)
+            if len(unq_ext[0]) != 0:
+                for ext in unq_ext[0]:
+                    hard_border_mask = (hard_border_mask & (this_y != unq[ext]))
+                hard_b_label = this_y[hard_border_mask]
+            ### ###
+
+
+            border_class = torch.unique(border_label, return_counts=True)
+
+
+            # hard_b_pred_label = this_pred[hard_border_mask]
+            # np.save("/ws/result/border_test_2048/hard_b_label_gt.npy", hard_b_label.detach().cpu().numpy())
+            # np.save("/ws/result/border_test_2048/hard_b_label_pred.npy", hard_b_pred_label.detach().cpu().numpy())
+
+            # border_class = torch.unique(border_label)
 
             print(border_class)
 
-            border_feature = X[ii, :, be_yhat_mask]
+            # border_feature = X[ii, :, be_yhat_mask]
+            border_feature = X[ii, :, hard_border_mask]
             print(border_feature)
 
-            border_label = border_label.contiguous().view(-1, 1)
-            contrast_mask = torch.eq(border_label, torch.transpose(border_label, 0, 1)).float().cuda() # border samples mask
+            # border_label = border_label.contiguous().view(-1, 1)
+            hard_b_label = hard_b_label.contiguous().view(-1, 1)
+
+            # contrast_mask = torch.eq(border_label, torch.transpose(border_label, 0, 1)).float().cuda() # border samples mask
+            contrast_mask = torch.eq(hard_b_label, torch.transpose(hard_b_label, 0, 1)).float().cuda() # border samples mask
 
             border_dot = torch.div(torch.matmul(torch.transpose(border_feature, 0, 1), border_feature ),
                                             self.temperature)
@@ -208,16 +257,119 @@ class PixelContrastLoss(nn.Module):
 
             exp_logits = torch.exp(logits)
             log_prob = logits - torch.log(exp_logits + neg_logits)
-            mean_log_prob_pos = (contrast_mask * log_prob).sum(1) / contrast_mask.sum(1)  # good
+            # log_prob2 = torch.log(exp_logits / (exp_logits + neg_logits)) # there's no need to do
+
+            mean_log_prob_pos = (contrast_mask * log_prob).sum(1) / contrast_mask.sum(1)  # good not good! if sample is one it goes to zero ...
 
             loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
             loss = loss.mean()
-            print("border loss: ", loss)
+            print("hard border loss: ", loss)
 
             # import numpy as np
             # np.save("/ws/result/border_test_512/border_label.npy", border_label.detach().cpu().numpy())
             # np.save("/ws/result/border_test_512/contrast_mask.npy", contrast_mask.detach().cpu().numpy())
             # np.save("/ws/result/border_test_512/border_dot.npy", border_dot.detach().cpu().numpy())
+
+            print("borrrrder")
+
+    def consine_similarity_test(self, X, y_hat, y):
+        # X = b x C x H x W
+        batch_size, feat_dim = X.shape[0], X.shape[1]
+        gt_class_all_batch = y_hat.contiguous().view(batch_size, -1)
+        for ii in range(batch_size):
+            # class aware
+            gt_class = torch.unique(gt_class_all_batch[ii]) # tensor returned
+            this_y = y_hat[ii] # gt
+            this_pred = y[ii] # prediction
+            be_yhat = self.border_ext.get_border_from_label(this_y, erode_iter=1)
+
+            for one_class in gt_class:
+                if one_class == 0:
+                    continue
+                class_mask = (this_y == one_class) & (this_y > 0)
+                # class_feature = X[ii, :, class_mask]
+
+                right_pred_mask = class_mask & (this_y == this_pred)
+
+                easy_positive_mask = right_pred_mask
+
+                feature = X[ii, :, easy_positive_mask] # easy positive_feature
+                label = this_y[easy_positive_mask]
+                # border_dot = torch.div(torch.matmul(torch.transpose(easy_class_feature, 0, 1), easy_class_feature),
+                #                        self.temperature) # easy - to - easy cosine similarity
+                import numpy as np
+                np.save("/ws/result/cos_sim_test_2048/easy_positive_class_" + str(one_class.item()) + "_label.npy", label.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/easy_positive_class"+ str(one_class.item())  +"_feature.npy", feature.detach().cpu().numpy())
+                #
+
+                hard_positive_mask = class_mask & (this_y != this_pred)
+                feature = X[ii, :, hard_positive_mask]
+                label = this_y[hard_positive_mask]
+                # border_dot = torch.div(torch.matmul(torch.transpose(hard_class_feature, 0, 1), easy_class_feature),
+                #                        self.temperature)  # easy - to - easy cosine similarity
+
+                np.save("/ws/result/cos_sim_test_2048/hard_positive_class_" + str(one_class) + "_label.npy", label.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/hard_positive_class"+ str(one_class)  +"_feature.npy", feature.detach().cpu().numpy())
+
+
+                easy_negative_mask = (this_y > 0) & (this_y != one_class) & torch.eq(this_y,this_pred)
+                feature = X[ii, :, easy_negative_mask]
+                label =  this_y[easy_negative_mask]
+                # border_dot = torch.div(torch.matmul(torch.transpose(easy_neg_feature, 0, 1), easy_class_feature),
+                #                        self.temperature)
+
+                np.save("/ws/result/cos_sim_test_2048/easy_negative_class" + str(one_class) + "_label.npy",
+                        label.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/easy_negative_class" + str(one_class) + "_feature.npy",
+                        feature.detach().cpu().numpy())
+
+                hard_negative_mask = (this_y > 0) & (this_y != one_class) & (this_pred == one_class)
+                feature = X[ii, :, hard_negative_mask]
+                label = this_y[hard_negative_mask]
+                # border_dot = torch.div(torch.matmul(torch.transpose(hard_neg_feature, 0, 1), easy_class_feature),
+                #                        self.temperature)
+                #
+                np.save("/ws/result/cos_sim_test_2048/hard_negative_class" + str(one_class) + "_label.npy", label.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/hard_negative_class" + str(one_class) + "_feature.npy",feature.detach().cpu().numpy())
+            #
+            print("cos sim!!!!")
+
+
+
+            # # border_label = border_label.contiguous().view(-1, 1)
+            # hard_b_label = hard_b_label.contiguous().view(-1, 1)
+            #
+            # # contrast_mask = torch.eq(border_label, torch.transpose(border_label, 0, 1)).float().cuda() # border samples mask
+            # contrast_mask = torch.eq(hard_b_label, torch.transpose(hard_b_label, 0, 1)).float().cuda() # border samples mask
+            #
+            # border_dot = torch.div(torch.matmul(torch.transpose(border_feature, 0, 1), border_feature ), self.temperature)
+            #
+            # logits_max, _ = torch.max(border_dot, dim=1, keepdim=True)
+            # logits = border_dot - logits_max.detach()
+            #
+            # neg_mask = 1 - contrast_mask
+            #
+            # logits_mask = 1 - torch.eye(contrast_mask.shape[0])
+            # contrast_mask = contrast_mask * logits_mask.cuda()
+            #
+            #
+            # neg_logits = torch.exp(logits) * neg_mask
+            # neg_logits = neg_logits.sum(1, keepdim=True)
+            #
+            # exp_logits = torch.exp(logits)
+            # log_prob = logits - torch.log(exp_logits + neg_logits)
+            # # log_prob2 = torch.log(exp_logits / (exp_logits + neg_logits)) # there's no need to do
+            #
+            # mean_log_prob_pos = (contrast_mask * log_prob).sum(1) / contrast_mask.sum(1)  # good not good! if sample is one it goes to zero ...
+            #
+            # loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
+            # loss = loss.mean()
+            # print("hard border loss: ", loss)
+            #
+            # # import numpy as np
+            # # np.save("/ws/result/border_test_512/border_label.npy", border_label.detach().cpu().numpy())
+            # # np.save("/ws/result/border_test_512/contrast_mask.npy", contrast_mask.detach().cpu().numpy())
+            # # np.save("/ws/result/border_test_512/border_dot.npy", border_dot.detach().cpu().numpy())
 
             print("borrrrder")
 
@@ -375,6 +527,7 @@ class PixelContrastLoss(nn.Module):
                     if cls_id.item() not in self.minor_queue:
                         self.minor_queue[cls_id.item()] = X[ii, indices, :].squeeze(1)
                     else:
+
                         tmp = self.minor_queue[cls_id.item()]
                         tmp = torch.cat((tmp, X[ii, indices, :].squeeze(1)), dim=0)
 
@@ -383,6 +536,8 @@ class PixelContrastLoss(nn.Module):
                             tmp = tmp[perm[:100],:]
 
                         self.minor_queue[cls_id.item()] = tmp
+
+
         print("minor samples!")
     def _memory_bank_sampling(self):
         feats_keys = list(self.queue.keys())
