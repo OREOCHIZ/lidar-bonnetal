@@ -41,6 +41,13 @@ if __name__ == '__main__':
       required=True,
       help='Architecture yaml cfg file. See /config/arch for sample. No default!',
   )
+  parser.add_argument(
+      '--conf', '-co',
+      type=str,
+      default="cos",
+      help='confusion matrix of cosine similarity. set this as cos or conf',
+  )
+
   FLAGS, unparsed = parser.parse_known_args()
 
   # print summary of what we will do
@@ -49,6 +56,7 @@ if __name__ == '__main__':
   print("dataset", FLAGS.dataset)
   print("log", FLAGS.log)
   print("model", FLAGS.model)
+  print("mode? ", FLAGS.conf)
   print("----------\n")
   # print("Commit hash (training version): ", str(
   #     subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).strip()))
@@ -111,5 +119,5 @@ if __name__ == '__main__':
     quit()
 
   # create user and infer dataset
-  user = Confusion_Test(ARCH, DATA, FLAGS.dataset, FLAGS.log, FLAGS.model)
+  user = Confusion_Test(ARCH, DATA, FLAGS.dataset, FLAGS.log, FLAGS.model, FLAGS.conf)
   user.infer()

@@ -76,28 +76,26 @@ class PixelContrastLoss(nn.Module):
 
     def forward(self, feats, labels, predict):
         # self.border_sampling(feats, labels, predict)
-        self.consine_similarity_test(feats, labels, predict)
+        loss = self.anchor_aware_sampling(feats, labels, predict)
 
-
-        labels = labels.unsqueeze(1).float().clone()
-        labels = torch.nn.functional.interpolate(labels,
-                                                 (feats.shape[2], feats.shape[3]), mode='nearest')
-        labels = labels.squeeze(1).long() # BATCH(=4) * 64 * 512
-        assert labels.shape[-1] == feats.shape[-1], '{} {}'.format(labels.shape, feats.shape)
-
-        batch_size = feats.shape[0]
-
-        labels = labels.contiguous().view(batch_size, -1) # after shape: batch_size * (H * W * channel(channel maybe 1, because it's logits))
-        predict = predict.contiguous().view(batch_size, -1) # after shape: batch_size * (H * W * channel(channel maybe 1, because it's logits))
-        feats = feats.permute(0, 2, 3, 1) # after shape: batch_size * H * W * channels( = 256 )
-        feats = feats.contiguous().view(feats.shape[0], -1, feats.shape[-1]) #after shape: batch_size * (H*W) * channels ( = 256 )
-
-        feats_, labels_ = self._hard_anchor_sampling(feats, labels, predict)
-        # feats_, labels_ = self._hard_anchor_sampling_V2(feats, labels, predict) #221017 modify!
-        # self._minor_anchor_sampling_(feats, labels, predict)
-        #additional training & loss
-
-        loss = self._contrastive(feats_, labels_)
+        ### edit seoyeon ###
+        # labels = labels.unsqueeze(1).float().clone()
+        # labels = torch.nn.functional.interpolate(labels,
+        #                                          (feats.shape[2], feats.shape[3]), mode='nearest')
+        # labels = labels.squeeze(1).long() # BATCH(=4) * 64 * 512
+        # assert labels.shape[-1] == feats.shape[-1], '{} {}'.format(labels.shape, feats.shape)
+        #
+        # batch_size = feats.shape[0]
+        #
+        # labels = labels.contiguous().view(batch_size, -1) # after shape: batch_size * (H * W * channel(channel maybe 1, because it's logits))
+        # predict = predict.contiguous().view(batch_size, -1) # after shape: batch_size * (H * W * channel(channel maybe 1, because it's logits))
+        # feats = feats.permute(0, 2, 3, 1) # after shape: batch_size * H * W * channels( = 256 )
+        # feats = feats.contiguous().view(feats.shape[0], -1, feats.shape[-1]) #after shape: batch_size * (H*W) * channels ( = 256 )
+        #
+        # feats_, labels_ = self._hard_anchor_sampling(feats, labels, predict)
+        #
+        # loss = self._contrastive(feats_, labels_)
+        ### edit seoyeon ###
         return loss
 
 
@@ -272,16 +270,110 @@ class PixelContrastLoss(nn.Module):
 
             print("borrrrder")
 
+    def anchor_aware_sampling(self, X, y_hat, y):
+        batch_size, feat_dim = X.shape[0], X.shape[1]
+        gt_class_all_batch = y_hat.contiguous().view(batch_size, -1)
+
+        for ii in range(batch_size):
+            gt_class, anch_num = torch.unique(gt_class_all_batch[ii], return_counts = True)
+            this_y = y_hat[ii]
+            this_pred = y[ii]
+            total_loss = []
+            for i, one_class in enumerate(gt_class):
+                if one_class == 0 or anch_num[i] < 2:
+                    continue
+                else:
+                    class_mask = (this_y == one_class) & (this_y > 0)
+
+                    easy_positive_mask = class_mask & (this_y == this_pred)
+                    hard_positive_mask = class_mask & (this_y != this_pred)
+                    hard_negative_mask = (this_y > 0) & (this_y != one_class) & (this_pred == one_class)
+
+                    ep_feat = None
+
+                    if not torch.all(~easy_positive_mask):
+                        ep_feat = X[ii, :, easy_positive_mask]
+                    else:
+                        continue
+
+                    hp_feat = None
+                    if not torch.all(~ hard_positive_mask):
+                        hp_feat = X[ii, :, hard_positive_mask]
+                    else:
+                        continue
+                    hn_feat = None
+
+                    if not torch.all(~ hard_negative_mask):
+                        hn_feat = X[ii, :, hard_negative_mask]
+                    else:
+                        continue
+
+                    if (ep_feat == None) | (hp_feat == None) | (hn_feat == None):
+                        continue
+
+                    a, b, c = ep_feat.shape[1], hp_feat.shape[1], hn_feat.shape[1]
+
+                    # pseudo code ...
+                    a_keep = 0
+                    b_keep = 0
+                    c_keep = 0
+                    if c > self.max_samples * 0.5:
+                        c_keep = int(self.max_samples * 0.5)
+                    else:
+                        c_keep = c
+
+                    if a > self.max_samples * 0.25 :
+                        a_keep = int(self.max_samples * 0.25)
+                    else:
+                        a_keep = a
+
+                    if b > self.max_samples * 0.25:
+                        b_keep = int(self.max_samples * 0.25)
+                    else:
+                        b_keep = b
+
+                    perm = torch.randperm(c_keep)
+                    hn_feat = hn_feat[:, perm[:c_keep]]
+                    perm = torch.randperm(b_keep)
+                    hp_feat = hp_feat[:, perm[:b_keep]]
+                    perm = torch.randperm(a_keep)
+                    ep_feat = ep_feat[:, perm[:a_keep]]
+
+                    pos_dot = torch.div(torch.matmul(torch.transpose(hp_feat, 0, 1), ep_feat), self.temperature) # i*i+ / tau, P * 256 * 256 * A == P*A
+                    neg_dot = torch.div(torch.matmul(torch.transpose(hn_feat, 0, 1), ep_feat), self.temperature)  # i*i- / tau, N * 256 * 256 * A == N*A
+
+                    # i * i can be +10 ~ -10
+                    logit_max = 1 / self.temperature
+
+                    pos_dot = pos_dot - logit_max
+                    neg_dot = neg_dot - logit_max
+
+                    exp_pos = torch.exp(pos_dot)
+                    exp_neg = torch.exp(neg_dot)
+                    exp_neg = exp_neg.sum(0, keepdim= True)
+                    log_prob = pos_dot - torch.log(exp_pos + exp_neg) #problem
+                    mean_log_prob = log_prob.sum(0) / log_prob.shape[0]
+                    loss = - (self.temperature / self.base_temperature) * mean_log_prob
+                    loss = loss.mean()
+                    total_loss.append(loss)
+
+                    # print("anchor aware sampling")
+            anc_aware_loss = sum(total_loss) / len(total_loss)
+            # print("anchor aware loss: ", anc_aware_loss)
+            return anc_aware_loss
+
     def consine_similarity_test(self, X, y_hat, y):
         # X = b x C x H x W
         batch_size, feat_dim = X.shape[0], X.shape[1]
         gt_class_all_batch = y_hat.contiguous().view(batch_size, -1)
+
+
         for ii in range(batch_size):
             # class aware
             gt_class = torch.unique(gt_class_all_batch[ii]) # tensor returned
             this_y = y_hat[ii] # gt
             this_pred = y[ii] # prediction
-            be_yhat = self.border_ext.get_border_from_label(this_y, erode_iter=1)
+            # be_yhat = self.border_ext.get_border_from_label(this_y, erode_iter=1)
 
             for one_class in gt_class:
                 if one_class == 0:
@@ -290,48 +382,40 @@ class PixelContrastLoss(nn.Module):
                 # class_feature = X[ii, :, class_mask]
 
                 right_pred_mask = class_mask & (this_y == this_pred)
-
                 easy_positive_mask = right_pred_mask
 
                 feature = X[ii, :, easy_positive_mask] # easy positive_feature
-                label = this_y[easy_positive_mask]
-                # border_dot = torch.div(torch.matmul(torch.transpose(easy_class_feature, 0, 1), easy_class_feature),
-                #                        self.temperature) # easy - to - easy cosine similarity
+                # label = this_y[easy_positive_mask]
+
                 import numpy as np
-                np.save("/ws/result/cos_sim_test_2048/easy_positive_class_" + str(one_class.item()) + "_label.npy", label.detach().cpu().numpy())
-                np.save("/ws/result/cos_sim_test_2048/easy_positive_class"+ str(one_class.item())  +"_feature.npy", feature.detach().cpu().numpy())
-                #
+                # np.save("/ws/result/cos_sim_test_2048/easy_positive_class_" + str(one_class.item()) + "_label.npy", label.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/easy_positive_class_"+ str(one_class.item())  +"_feature.npy", feature.cpu().numpy())
+
 
                 hard_positive_mask = class_mask & (this_y != this_pred)
                 feature = X[ii, :, hard_positive_mask]
                 label = this_y[hard_positive_mask]
-                # border_dot = torch.div(torch.matmul(torch.transpose(hard_class_feature, 0, 1), easy_class_feature),
-                #                        self.temperature)  # easy - to - easy cosine similarity
 
-                np.save("/ws/result/cos_sim_test_2048/hard_positive_class_" + str(one_class) + "_label.npy", label.detach().cpu().numpy())
-                np.save("/ws/result/cos_sim_test_2048/hard_positive_class"+ str(one_class)  +"_feature.npy", feature.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/hard_positive_class_" + str(one_class.item()) + "_label.npy", label.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/hard_positive_class_"+ str(one_class.item())  +"_feature.npy", feature.detach().cpu().numpy())
 
-
+                #
                 easy_negative_mask = (this_y > 0) & (this_y != one_class) & torch.eq(this_y,this_pred)
                 feature = X[ii, :, easy_negative_mask]
-                label =  this_y[easy_negative_mask]
-                # border_dot = torch.div(torch.matmul(torch.transpose(easy_neg_feature, 0, 1), easy_class_feature),
-                #                        self.temperature)
+                # label =  this_y[easy_negative_mask]
 
-                np.save("/ws/result/cos_sim_test_2048/easy_negative_class" + str(one_class) + "_label.npy",
-                        label.detach().cpu().numpy())
-                np.save("/ws/result/cos_sim_test_2048/easy_negative_class" + str(one_class) + "_feature.npy",
+                # np.save("/ws/result/cos_sim_test_2048/easy_negative_class_" + str(one_class.item()) + "_label.npy",
+                #         label.detach().cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/easy_negative_class_" + str(one_class.item()) + "_feature.npy",
                         feature.detach().cpu().numpy())
 
                 hard_negative_mask = (this_y > 0) & (this_y != one_class) & (this_pred == one_class)
                 feature = X[ii, :, hard_negative_mask]
                 label = this_y[hard_negative_mask]
-                # border_dot = torch.div(torch.matmul(torch.transpose(hard_neg_feature, 0, 1), easy_class_feature),
-                #                        self.temperature)
-                #
-                np.save("/ws/result/cos_sim_test_2048/hard_negative_class" + str(one_class) + "_label.npy", label.detach().cpu().numpy())
-                np.save("/ws/result/cos_sim_test_2048/hard_negative_class" + str(one_class) + "_feature.npy",feature.detach().cpu().numpy())
-            #
+
+                np.save("/ws/result/cos_sim_test_2048/hard_negative_class_" + str(one_class.item()) + "_label.npy", label.cpu().numpy())
+                np.save("/ws/result/cos_sim_test_2048/hard_negative_class_" + str(one_class.item()) + "_feature.npy",feature.cpu().numpy())
+
             print("cos sim!!!!")
 
 

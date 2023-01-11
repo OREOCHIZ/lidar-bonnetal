@@ -20,17 +20,18 @@ import numpy as np
 from tasks.semantic.modules.segmentator_contrastive import *
 from tasks.semantic.postproc.KNN import KNN
 from tasks.semantic.modules.ioueval import *
+from tasks.semantic.modules.loss_contrastive import *
 
 
 class Confusion_Test():
-  def __init__(self, ARCH, DATA, datadir, logdir, modeldir):
+  def __init__(self, ARCH, DATA, datadir, logdir, modeldir, conf_mode):
     # parameters
     self.ARCH = ARCH
     self.DATA = DATA
     self.datadir = datadir
     self.logdir = logdir
     self.modeldir = modeldir
-
+    self.conf_mode = conf_mode
 
     # get the data
     parserModule = imp.load_source("parserModule",
@@ -75,7 +76,7 @@ class Confusion_Test():
       self.model.cuda()
 
     self.evaluator = iouEval(self.parser.get_n_classes(), self.device, [0]) # 0 == ignore class
-
+    self.criterion = PixelContrastLoss(self.ARCH).to(self.device)
   def infer(self):
     # do train set
     # self.infer_subset(loader=self.parser.get_train_set(),
@@ -103,10 +104,11 @@ class Confusion_Test():
     with torch.no_grad():
       end = time.time()
       add_batch_counter = 0
+
       for i, (proj_in, proj_mask, proj_labels, _, path_seq, path_name, p_x, p_y, proj_range, unproj_range, _, _, _, _, npoints) in enumerate(loader):
         # first cut to rela size (batch size one allows it)
 
-        path_seq = path_seq[0]
+        path_name = path_name[0]
 
         if self.gpu:
           proj_in = proj_in.cuda()
@@ -119,8 +121,23 @@ class Confusion_Test():
 
         seg_out = proj_output['seg']
         embed_out = proj_output['embed']
-        self.evaluator.reset()
 
-        proj_argmax = seg_out[0].argmax(dim=0)
-        self.evaluator.addBatch_save_conf(proj_argmax, proj_labels, add_batch_counter)
-        add_batch_counter += 1
+
+
+        if self.gpu:
+            embed_out = embed_out.cuda()
+            # proj_argmax = proj_argmax.cuda()
+
+        if self.conf_mode == "conf":
+            self.evaluator.reset()
+
+            proj_argmax = seg_out[0].argmax(dim=0)
+            self.evaluator.addBatch_save_conf(proj_argmax, proj_labels, add_batch_counter)
+            add_batch_counter += 1
+
+        elif self.conf_mode == "cos":
+            add_batch_counter += 1
+            if int(path_name[0:6]) == 95:
+                _, predict = torch.max(seg_out, 1)
+                predict = predict.cuda()
+                self.criterion(embed_out, proj_labels, predict)
